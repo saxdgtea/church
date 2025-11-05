@@ -15,7 +15,7 @@ const app = express();
 // Middleware
 app.use(
   cors({
-    origin: ["https://your-frontend-domain.com"]
+    origin: ["https://your-frontend-domain.com"],
     methods: "GET,POST,PUT,DELETE",
   })
 );
