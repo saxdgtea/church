@@ -57,7 +57,7 @@ app.use("/api/contact", require("./routes/contact"));
 app.use("/api/about", require("./routes/about"));
 
 // ✅ Health check
-app.get("/api/health", (req, res) => {
+app.get("/", (req, res) => {
   res.json({ status: "OK", message: "Church Website API is running" });
 });
 
