@@ -22,6 +22,9 @@ const app = express();
 // Connect to MongoDB
 connectDatabase();
 
+// ⭐ Enable trust proxy for deployment behind reverse proxy (Render)
+app.set("trust proxy", 1);
+
 // Security middleware
 app.use(helmet());
 
