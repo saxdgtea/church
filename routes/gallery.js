@@ -1,147 +1,273 @@
 const express = require("express");
 const router = express.Router();
 const Gallery = require("../models/Gallery");
-const auth = require("../middleware/auth");
-const upload = require("../middleware/upload");
-const { getImageUrl } = require("../config/config");
+const { protect, authorize } = require("../middleware/auth");
+const { uploadMultiple, handleUploadError } = require("../middleware/upload");
+const { uploadMultipleImages, deleteImage } = require("../utils/cloudinary");
+const { validateObjectId, validate } = require("../utils/validation");
+const { body } = require("express-validator");
 
-const formatGallery = (gallery) => {
-  const galleryObj = gallery.toObject ? gallery.toObject() : gallery;
-  return {
-    ...galleryObj,
-    images: galleryObj.images.map((img) => getImageUrl(img)),
-  };
-};
+// Gallery album validation
+const albumValidation = [
+  body("albumName")
+    .trim()
+    .notEmpty()
+    .withMessage("Album name is required")
+    .isLength({ max: 100 })
+    .withMessage("Album name cannot exceed 100 characters"),
+  body("description")
+    .optional()
+    .trim()
+    .isLength({ max: 500 })
+    .withMessage("Description cannot exceed 500 characters"),
+];
 
 // @route   GET /api/gallery
-// @desc    Get all gallery albums
+// @desc    Get all published albums
 // @access  Public
-router.get("/", async (req, res) => {
+router.get("/", async (req, res, next) => {
   try {
-    const albums = await Gallery.find().sort({ createdAt: -1 });
-    const formattedAlbums = albums.map(formatGallery);
-    res.json(formattedAlbums);
+    const albums = await Gallery.find({ isPublished: true })
+      .sort({ date: -1 })
+      .select("-__v");
+
+    res.status(200).json({
+      success: true,
+      count: albums.length,
+      data: albums,
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    next(error);
   }
 });
 
 // @route   GET /api/gallery/:id
 // @desc    Get single album
 // @access  Public
-router.get("/:id", async (req, res) => {
+router.get("/:id", validateObjectId, validate, async (req, res, next) => {
   try {
     const album = await Gallery.findById(req.params.id);
+
     if (!album) {
-      return res.status(404).json({ message: "Album not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Album not found",
+      });
     }
-    res.json(formatGallery(album));
+
+    res.status(200).json({
+      success: true,
+      data: album,
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    next(error);
   }
 });
 
 // @route   POST /api/gallery
-// @desc    Create album
-// @access  Private
-router.post("/", auth, async (req, res) => {
-  try {
-    const album = new Gallery({
-      name: req.body.name,
-      images: [],
-    });
-
-    const savedAlbum = await album.save();
-    res.status(201).json(formatGallery(savedAlbum));
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-});
-
-// @route   PUT /api/gallery/:id
-// @desc    Update album name
-// @access  Private
-router.put("/:id", auth, async (req, res) => {
-  try {
-    const album = await Gallery.findByIdAndUpdate(
-      req.params.id,
-      { name: req.body.name },
-      { new: true }
-    );
-
-    if (!album) {
-      return res.status(404).json({ message: "Album not found" });
-    }
-
-    res.json(formatGallery(album));
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-});
-
-// @route   POST /api/gallery/:id/images
-// @desc    Add images to album
-// @access  Private
+// @desc    Create new album
+// @access  Private (Admin/Editor)
 router.post(
-  "/:id/images",
-  auth,
-  upload.array("images", 10),
-  async (req, res) => {
+  "/",
+  protect,
+  authorize("admin", "editor"),
+  uploadMultiple,
+  handleUploadError,
+  albumValidation,
+  validate,
+  async (req, res, next) => {
     try {
-      const album = await Gallery.findById(req.params.id);
-      if (!album) {
-        return res.status(404).json({ message: "Album not found" });
+      const { albumName, description, date } = req.body;
+
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Please upload at least one image",
+        });
       }
 
-      const imagePaths = req.files.map(
-        (file) => "/uploads/gallery/" + file.filename
+      // Upload images to Cloudinary
+      const imageResults = await uploadMultipleImages(
+        req.files,
+        "church-website/gallery"
       );
-      album.images.push(...imagePaths);
-      await album.save();
 
-      res.json(formatGallery(album));
+      // Format images for database
+      const images = imageResults.map((result, index) => ({
+        url: result.url,
+        publicId: result.publicId,
+        caption: req.body[`captions[${index}]`] || "",
+      }));
+
+      // First image as cover image
+      const coverImage = {
+        url: imageResults[0].url,
+        publicId: imageResults[0].publicId,
+      };
+
+      // Create album
+      const album = await Gallery.create({
+        albumName,
+        description,
+        coverImage,
+        images,
+        date: date || Date.now(),
+        createdBy: req.user._id,
+      });
+
+      res.status(201).json({
+        success: true,
+        message: "Album created successfully",
+        data: album,
+      });
     } catch (error) {
-      console.error("Error uploading images:", error);
-      res.status(400).json({ message: error.message });
+      next(error);
     }
   }
 );
 
-// @route   DELETE /api/gallery/:id/images
-// @desc    Delete image from album
-// @access  Private
-router.delete("/:id/images", auth, async (req, res) => {
-  try {
-    const album = await Gallery.findById(req.params.id);
-    if (!album) {
-      return res.status(404).json({ message: "Album not found" });
+// @route   POST /api/gallery/:id/images
+// @desc    Add images to existing album
+// @access  Private (Admin/Editor)
+router.post(
+  "/:id/images",
+  protect,
+  authorize("admin", "editor"),
+  validateObjectId,
+  validate,
+  uploadMultiple,
+  handleUploadError,
+  async (req, res, next) => {
+    try {
+      const album = await Gallery.findById(req.params.id);
+
+      if (!album) {
+        return res.status(404).json({
+          success: false,
+          message: "Album not found",
+        });
+      }
+
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Please upload at least one image",
+        });
+      }
+
+      // Upload images to Cloudinary
+      const imageResults = await uploadMultipleImages(
+        req.files,
+        "church-website/gallery"
+      );
+
+      // Format new images
+      const newImages = imageResults.map((result, index) => ({
+        url: result.url,
+        publicId: result.publicId,
+        caption: req.body[`captions[${index}]`] || "",
+      }));
+
+      // Add to existing images
+      album.images.push(...newImages);
+      await album.save();
+
+      res.status(200).json({
+        success: true,
+        message: "Images added successfully",
+        data: album,
+      });
+    } catch (error) {
+      next(error);
     }
-
-    const { imagePath } = req.body;
-    album.images = album.images.filter((img) => img !== imagePath);
-    await album.save();
-
-    res.json(formatGallery(album));
-  } catch (error) {
-    console.error("Error deleting image:", error);
-    res.status(400).json({ message: error.message });
   }
-});
+);
 
 // @route   DELETE /api/gallery/:id
 // @desc    Delete album
-// @access  Private
-router.delete("/:id", auth, async (req, res) => {
-  try {
-    const album = await Gallery.findByIdAndDelete(req.params.id);
-    if (!album) {
-      return res.status(404).json({ message: "Album not found" });
+// @access  Private (Admin)
+router.delete(
+  "/:id",
+  protect,
+  authorize("admin"),
+  validateObjectId,
+  validate,
+  async (req, res, next) => {
+    try {
+      const album = await Gallery.findById(req.params.id);
+
+      if (!album) {
+        return res.status(404).json({
+          success: false,
+          message: "Album not found",
+        });
+      }
+
+      // Delete all images from Cloudinary
+      const deletePromises = album.images.map((image) =>
+        deleteImage(image.publicId)
+      );
+
+      if (album.coverImage && album.coverImage.publicId) {
+        deletePromises.push(deleteImage(album.coverImage.publicId));
+      }
+
+      await Promise.all(deletePromises);
+
+      await album.deleteOne();
+
+      res.status(200).json({
+        success: true,
+        message: "Album deleted successfully",
+      });
+    } catch (error) {
+      next(error);
     }
-    res.json({ message: "Album deleted successfully" });
-  } catch (error) {
-    console.error("Error deleting album:", error);
-    res.status(500).json({ message: error.message });
   }
-});
+);
+
+// @route   DELETE /api/gallery/:albumId/images/:imageId
+// @desc    Delete single image from album
+// @access  Private (Admin/Editor)
+router.delete(
+  "/:albumId/images/:imageId",
+  protect,
+  authorize("admin", "editor"),
+  async (req, res, next) => {
+    try {
+      const album = await Gallery.findById(req.params.albumId);
+
+      if (!album) {
+        return res.status(404).json({
+          success: false,
+          message: "Album not found",
+        });
+      }
+
+      const image = album.images.id(req.params.imageId);
+
+      if (!image) {
+        return res.status(404).json({
+          success: false,
+          message: "Image not found",
+        });
+      }
+
+      // Delete from Cloudinary
+      await deleteImage(image.publicId);
+
+      // Remove from array
+      image.deleteOne();
+      await album.save();
+
+      res.status(200).json({
+        success: true,
+        message: "Image deleted successfully",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 module.exports = router;

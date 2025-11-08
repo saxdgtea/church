@@ -1,103 +1,79 @@
 const mongoose = require("mongoose");
 
+const sectionSchema = new mongoose.Schema({
+  title: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  content: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  imageUrl: String,
+  imagePublicId: String,
+  order: {
+    type: Number,
+    default: 0,
+  },
+});
+
 const leaderSchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
+    trim: true,
   },
-  role: {
+  title: {
     type: String,
     required: true,
+    trim: true,
   },
   bio: {
     type: String,
-    required: true,
+    trim: true,
   },
-  image: {
-    type: String,
-  },
-  email: {
-    type: String,
+  imageUrl: String,
+  imagePublicId: String,
+  order: {
+    type: Number,
+    default: 0,
   },
 });
 
 const aboutSchema = new mongoose.Schema(
   {
-    // Church Info
-    churchName: {
+    welcomeMessage: {
       type: String,
-      default: "Grace Community Church",
+      required: true,
+      trim: true,
     },
-    tagline: {
+    welcomeImageUrl: String,
+    welcomeImagePublicId: String,
+    sections: [sectionSchema],
+    leadership: [leaderSchema],
+    missionStatement: {
       type: String,
-      default: "A Place of Faith, Hope, and Love",
+      trim: true,
     },
-    heroImage: {
+    visionStatement: {
       type: String,
+      trim: true,
     },
-
-    // Our Story
-    storyTitle: {
-      type: String,
-      default: "Our Story",
-    },
-    storyContent: {
-      type: String,
-      default: "",
-    },
-    storyImage: {
-      type: String,
-    },
-
-    // Mission & Vision
-    missionTitle: {
-      type: String,
-      default: "Our Mission",
-    },
-    missionContent: {
-      type: String,
-      default: "",
-    },
-    missionImage: {
-      type: String,
-    },
-
-    visionTitle: {
-      type: String,
-      default: "Our Vision",
-    },
-    visionContent: {
-      type: String,
-      default: "",
-    },
-    visionImage: {
-      type: String,
-    },
-
-    // Core Values (array of objects)
     coreValues: [
       {
-        title: String,
-        description: String,
-        icon: String, // Icon name from react-icons or image URL
+        type: String,
+        trim: true,
       },
     ],
-
-    // Leadership Team
-    leaders: [leaderSchema],
-
-    // Stats
-    foundedYear: {
-      type: Number,
-      default: 1985,
+    lastUpdated: {
+      type: Date,
+      default: Date.now,
     },
-    memberCount: {
-      type: String,
-      default: "500+",
-    },
-    ministriesCount: {
-      type: String,
-      default: "15+",
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
     },
   },
   {
@@ -105,4 +81,8 @@ const aboutSchema = new mongoose.Schema(
   }
 );
 
+// Only allow one about doc
+//aboutSchema.index({ _id: 1 }, { unique: true });
+
+// ✅ Export the model so `require()` returns a working Mongoose model
 module.exports = mongoose.model("About", aboutSchema);

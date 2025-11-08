@@ -1,149 +1,342 @@
 const express = require("express");
 const router = express.Router();
 const Sermon = require("../models/Sermon");
-const auth = require("../middleware/auth");
-const upload = require("../middleware/upload");
-const { getImageUrl } = require("../config/config");
-
-// Helper function to format sermon with full image URL
-const formatSermon = (sermon) => {
-  const sermonObj = sermon.toObject ? sermon.toObject() : sermon;
-  return {
-    ...sermonObj,
-    image: getImageUrl(sermonObj.image),
-  };
-};
+const SermonLike = require("../models/SermonLike");
+const { protect, authorize } = require("../middleware/auth");
+const { uploadSingle, handleUploadError } = require("../middleware/upload");
+const { uploadImage, deleteImage } = require("../utils/cloudinary");
+const {
+  sermonValidation,
+  validateObjectId,
+  validate,
+} = require("../utils/validation");
 
 // @route   GET /api/sermons
-// @desc    Get all sermons
+// @desc    Get all published sermons
 // @access  Public
-router.get("/", async (req, res) => {
+router.get("/", async (req, res, next) => {
   try {
-    const limit = req.query.limit ? parseInt(req.query.limit) : 0;
-    const sermons = await Sermon.find().sort({ date: -1 }).limit(limit);
-    const formattedSermons = sermons.map(formatSermon);
-    res.json(formattedSermons);
+    const { page = 1, limit = 10, sort = "-date" } = req.query;
+
+    const sermons = await Sermon.find({ isPublished: true })
+      .sort(sort)
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .select("-__v");
+
+    const count = await Sermon.countDocuments({ isPublished: true });
+
+    res.status(200).json({
+      success: true,
+      count: sermons.length,
+      totalPages: Math.ceil(count / limit),
+      currentPage: page,
+      data: sermons,
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    next(error);
   }
 });
 
 // @route   GET /api/sermons/:id
 // @desc    Get single sermon
 // @access  Public
-router.get("/:id", async (req, res) => {
+router.get("/:id", validateObjectId, validate, async (req, res, next) => {
   try {
     const sermon = await Sermon.findById(req.params.id);
+
     if (!sermon) {
-      return res.status(404).json({ message: "Sermon not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Sermon not found",
+      });
     }
-    res.json(formatSermon(sermon));
+
+    res.status(200).json({
+      success: true,
+      data: sermon,
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// @route   POST /api/sermons/:id/like
-// @desc    Toggle like on sermon (increment or decrement)
-// @access  Public
-router.post("/:id/like", async (req, res) => {
-  try {
-    const sermon = await Sermon.findById(req.params.id);
-    if (!sermon) {
-      return res.status(404).json({ message: "Sermon not found" });
-    }
-
-    const { isLiked } = req.body;
-
-    if (isLiked) {
-      sermon.likes += 1;
-    } else {
-      sermon.likes = Math.max(0, sermon.likes - 1);
-    }
-
-    await sermon.save();
-    res.json({ likes: sermon.likes, message: "Like updated successfully" });
-  } catch (error) {
-    res.status(400).json({ message: error.message });
+    next(error);
   }
 });
 
 // @route   POST /api/sermons
-// @desc    Create sermon
-// @access  Private
-router.post("/", auth, upload.single("image"), async (req, res) => {
-  try {
-    const sermonData = {
-      title: req.body.title,
-      date: req.body.date,
-      scripture: req.body.scripture,
-      description: req.body.description,
-      youtubeUrl: req.body.youtubeUrl,
-      likes: 0,
-    };
+// @desc    Create new sermon
+// @access  Private (Admin/Editor)
+router.post(
+  "/",
+  protect,
+  authorize("admin", "editor"),
+  uploadSingle,
+  handleUploadError,
+  sermonValidation,
+  validate,
+  async (req, res, next) => {
+    try {
+      const { title, description, scripture, youtubeUrl, date, pastor } =
+        req.body;
 
-    if (req.file) {
-      sermonData.image = "/uploads/sermons/" + req.file.filename;
+      // Check if image was uploaded
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "Please upload a sermon image",
+        });
+      }
+
+      // Upload image to Cloudinary
+      const imageResult = await uploadImage(
+        req.file.buffer,
+        "church-website/sermons"
+      );
+
+      // Extract YouTube video ID
+      const extractYouTubeId = (url) => {
+        const regex =
+          /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
+        const match = url.match(regex);
+        return match ? match[1] : null;
+      };
+
+      const youtubeVideoId = extractYouTubeId(youtubeUrl);
+
+      if (!youtubeVideoId) {
+        // Delete uploaded image if YouTube URL is invalid
+        await deleteImage(imageResult.publicId);
+        return res.status(400).json({
+          success: false,
+          message: "Invalid YouTube URL",
+        });
+      }
+
+      // Create sermon
+      const sermon = await Sermon.create({
+        title,
+        description,
+        scripture,
+        imageUrl: imageResult.url,
+        imagePublicId: imageResult.publicId,
+        youtubeUrl,
+        youtubeVideoId,
+        date: date || Date.now(),
+        pastor: pastor || "Pastor",
+        createdBy: req.user._id,
+      });
+
+      res.status(201).json({
+        success: true,
+        message: "Sermon created successfully",
+        data: sermon,
+      });
+    } catch (error) {
+      next(error);
     }
-
-    const sermon = new Sermon(sermonData);
-    const savedSermon = await sermon.save();
-    res.status(201).json(formatSermon(savedSermon));
-  } catch (error) {
-    console.error("Error creating sermon:", error);
-    res.status(400).json({ message: error.message });
   }
-});
+);
 
 // @route   PUT /api/sermons/:id
 // @desc    Update sermon
-// @access  Private
-router.put("/:id", auth, upload.single("image"), async (req, res) => {
-  try {
-    const sermon = await Sermon.findById(req.params.id);
-    if (!sermon) {
-      return res.status(404).json({ message: "Sermon not found" });
+// @access  Private (Admin/Editor)
+router.put(
+  "/:id",
+  protect,
+  authorize("admin", "editor"),
+  validateObjectId,
+  validate,
+  uploadSingle,
+  handleUploadError,
+  sermonValidation,
+  validate,
+  async (req, res, next) => {
+    try {
+      let sermon = await Sermon.findById(req.params.id);
+
+      if (!sermon) {
+        return res.status(404).json({
+          success: false,
+          message: "Sermon not found",
+        });
+      }
+
+      const updateData = { ...req.body };
+
+      // If new image uploaded, upload to Cloudinary and delete old one
+      if (req.file) {
+        const imageResult = await uploadImage(
+          req.file.buffer,
+          "church-website/sermons"
+        );
+
+        // Delete old image
+        if (sermon.imagePublicId) {
+          await deleteImage(sermon.imagePublicId);
+        }
+
+        updateData.imageUrl = imageResult.url;
+        updateData.imagePublicId = imageResult.publicId;
+      }
+
+      // Extract YouTube video ID if URL changed
+      if (req.body.youtubeUrl && req.body.youtubeUrl !== sermon.youtubeUrl) {
+        const extractYouTubeId = (url) => {
+          const regex =
+            /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
+          const match = url.match(regex);
+          return match ? match[1] : null;
+        };
+
+        const youtubeVideoId = extractYouTubeId(req.body.youtubeUrl);
+        if (youtubeVideoId) {
+          updateData.youtubeVideoId = youtubeVideoId;
+        }
+      }
+
+      sermon = await Sermon.findByIdAndUpdate(req.params.id, updateData, {
+        new: true,
+        runValidators: true,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Sermon updated successfully",
+        data: sermon,
+      });
+    } catch (error) {
+      next(error);
     }
-
-    const updateData = {
-      title: req.body.title,
-      date: req.body.date,
-      scripture: req.body.scripture,
-      description: req.body.description,
-      youtubeUrl: req.body.youtubeUrl,
-    };
-
-    if (req.file) {
-      updateData.image = "/uploads/sermons/" + req.file.filename;
-    }
-
-    const updatedSermon = await Sermon.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true }
-    );
-
-    res.json(formatSermon(updatedSermon));
-  } catch (error) {
-    console.error("Error updating sermon:", error);
-    res.status(400).json({ message: error.message });
   }
-});
+);
 
 // @route   DELETE /api/sermons/:id
 // @desc    Delete sermon
-// @access  Private
-router.delete("/:id", auth, async (req, res) => {
-  try {
-    const sermon = await Sermon.findByIdAndDelete(req.params.id);
-    if (!sermon) {
-      return res.status(404).json({ message: "Sermon not found" });
+// @access  Private (Admin)
+router.delete(
+  "/:id",
+  protect,
+  authorize("admin"),
+  validateObjectId,
+  validate,
+  async (req, res, next) => {
+    try {
+      const sermon = await Sermon.findById(req.params.id);
+
+      if (!sermon) {
+        return res.status(404).json({
+          success: false,
+          message: "Sermon not found",
+        });
+      }
+
+      // Delete image from Cloudinary
+      if (sermon.imagePublicId) {
+        await deleteImage(sermon.imagePublicId);
+      }
+
+      // Delete all likes for this sermon
+      await SermonLike.deleteMany({ sermon: req.params.id });
+
+      await sermon.deleteOne();
+
+      res.status(200).json({
+        success: true,
+        message: "Sermon deleted successfully",
+      });
+    } catch (error) {
+      next(error);
     }
-    res.json({ message: "Sermon deleted successfully" });
+  }
+);
+
+// @route   POST /api/sermons/:id/like
+// @desc    Like/Unlike sermon
+// @access  Public
+router.post("/:id/like", validateObjectId, validate, async (req, res, next) => {
+  try {
+    const sermon = await Sermon.findById(req.params.id);
+
+    if (!sermon) {
+      return res.status(404).json({
+        success: false,
+        message: "Sermon not found",
+      });
+    }
+
+    // Get user identifier (IP address or session ID from request)
+    const userIdentifier = req.headers["x-user-id"] || req.ip || "anonymous";
+    const ipAddress = req.ip;
+
+    // Check if user already liked this sermon
+    const existingLike = await SermonLike.findOne({
+      sermon: req.params.id,
+      userIdentifier,
+    });
+
+    if (existingLike) {
+      // Unlike - remove like
+      await existingLike.deleteOne();
+      sermon.likes = Math.max(0, sermon.likes - 1);
+      await sermon.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Sermon unliked",
+        data: {
+          liked: false,
+          likes: sermon.likes,
+        },
+      });
+    } else {
+      // Like - add like
+      await SermonLike.create({
+        sermon: req.params.id,
+        userIdentifier,
+        ipAddress,
+      });
+
+      sermon.likes += 1;
+      await sermon.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Sermon liked",
+        data: {
+          liked: true,
+          likes: sermon.likes,
+        },
+      });
+    }
   } catch (error) {
-    console.error("Error deleting sermon:", error);
-    res.status(500).json({ message: error.message });
+    next(error);
   }
 });
+
+// @route   GET /api/sermons/:id/like-status
+// @desc    Check if user liked sermon
+// @access  Public
+router.get(
+  "/:id/like-status",
+  validateObjectId,
+  validate,
+  async (req, res, next) => {
+    try {
+      const userIdentifier = req.headers["x-user-id"] || req.ip || "anonymous";
+
+      const existingLike = await SermonLike.findOne({
+        sermon: req.params.id,
+        userIdentifier,
+      });
+
+      res.status(200).json({
+        success: true,
+        data: {
+          liked: !!existingLike,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 module.exports = router;

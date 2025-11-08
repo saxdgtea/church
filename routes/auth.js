@@ -1,87 +1,150 @@
 const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const { protect } = require("../middleware/auth");
+const {
+  registerValidation,
+  loginValidation,
+  validate,
+} = require("../utils/validation");
 
-// =============================
-// REGISTER
-// =============================
-router.post("/register", async (req, res) => {
+// Generate JWT token
+const generateToken = (id) => {
+  return jwt.sign({ id }, process.env.JWT_SECRET, {
+    expiresIn: "30d",
+  });
+};
+
+// @route   POST /api/auth/register
+// @desc    Register new admin user
+// @access  Public (in production, this should be protected)
+router.post(
+  "/register",
+  registerValidation,
+  validate,
+  async (req, res, next) => {
+    try {
+      const { username, email, password, role } = req.body;
+
+      // Check if user exists
+      const existingUser = await User.findOne({
+        $or: [{ email }, { username }],
+      });
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: "User with this email or username already exists",
+        });
+      }
+
+      // Create user
+      const user = await User.create({
+        username,
+        email,
+        password,
+        role: role || "viewer",
+      });
+
+      // Generate token
+      const token = generateToken(user._id);
+
+      res.status(201).json({
+        success: true,
+        message: "User registered successfully",
+        data: {
+          user: {
+            id: user._id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+          },
+          token,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// @route   POST /api/auth/login
+// @desc    Login user
+// @access  Public
+router.post("/login", loginValidation, validate, async (req, res, next) => {
   try {
-    const { username, password } = req.body;
+    const { email, password } = req.body;
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ username });
-    if (existingUser) {
-      return res.status(400).json({ message: "Username already exists" });
+    // Check for user and include password
+    const user = await User.findOne({ email }).select("+password");
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid credentials",
+      });
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Check if user is active
+    if (!user.isActive) {
+      return res.status(401).json({
+        success: false,
+        message: "Account is deactivated. Please contact administrator.",
+      });
+    }
 
-    // Create user
-    const newUser = await User.create({
-      username,
-      password: hashedPassword,
-    });
+    // Check password
+    const isMatch = await user.comparePassword(password);
 
-    // Create token
-    const token = jwt.sign(
-      { id: newUser._id, username: newUser.username },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid credentials",
+      });
+    }
 
-    res.status(201).json({
-      token,
-      user: {
-        id: newUser._id,
-        username: newUser.username,
+    // Generate token
+    const token = generateToken(user._id);
+
+    res.status(200).json({
+      success: true,
+      message: "Login successful",
+      data: {
+        user: {
+          id: user._id,
+          username: user.username,
+          email: user.email,
+          role: user.role,
+        },
+        token,
       },
     });
-  } catch (err) {
-    console.error("Registration Error:", err);
-    res.status(500).json({ message: "Server error" });
+  } catch (error) {
+    next(error);
   }
 });
 
-// =============================
-// LOGIN
-// =============================
-router.post("/login", async (req, res) => {
+// @route   GET /api/auth/me
+// @desc    Get current logged in user
+// @access  Private
+router.get("/me", protect, async (req, res, next) => {
   try {
-    const { username, password } = req.body;
+    const user = await User.findById(req.user.id);
 
-    // Find user
-    const user = await User.findOne({ username });
-    if (!user) {
-      return res.status(400).json({ message: "Invalid credentials" });
-    }
-
-    // Compare password
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).json({ message: "Invalid credentials" });
-    }
-
-    // Create token
-    const token = jwt.sign(
-      { id: user._id, username: user.username },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
-
-    res.json({
-      token,
-      user: {
-        id: user._id,
-        username: user.username,
+    res.status(200).json({
+      success: true,
+      data: {
+        user: {
+          id: user._id,
+          username: user.username,
+          email: user.email,
+          role: user.role,
+          isActive: user.isActive,
+        },
       },
     });
-  } catch (err) {
-    console.error("Login Error:", err);
-    res.status(500).json({ message: "Server error" });
+  } catch (error) {
+    next(error);
   }
 });
 
