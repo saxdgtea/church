@@ -81,8 +81,30 @@ const aboutSchema = new mongoose.Schema(
   }
 );
 
+// --- FIX: Add pre-save hook to clean temporary IDs for both CREATE and UPDATE ---
+aboutSchema.pre("save", function (next) {
+  // Helper function to clean an array of subdocuments
+  const cleanSubdocs = (subdocs) => {
+    if (!subdocs || !Array.isArray(subdocs)) {
+      return;
+    }
+    subdocs.forEach((doc) => {
+      // If _id exists and is not a valid ObjectId, delete it.
+      // Mongoose will automatically generate a new one for new subdocuments.
+      if (doc._id && !mongoose.Types.ObjectId.isValid(doc._id)) {
+        delete doc._id;
+      }
+    });
+  };
+
+  // Apply cleaning to both arrays that contain subdocuments
+  cleanSubdocs(this.leadership);
+  cleanSubdocs(this.sections);
+
+  next();
+});
+
 // Only allow one about doc
 //aboutSchema.index({ _id: 1 }, { unique: true });
 
-// ✅ Export the model so `require()` returns a working Mongoose model
 module.exports = mongoose.model("About", aboutSchema);

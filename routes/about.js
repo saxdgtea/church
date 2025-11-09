@@ -4,6 +4,7 @@ const About = require("../models/About");
 const { protect, authorize } = require("../middleware/auth");
 const { uploadSingle, handleUploadError } = require("../middleware/upload");
 const { uploadImage, deleteImage } = require("../utils/cloudinary");
+const mongoose = require("mongoose"); // Ensure mongoose is imported for validation
 
 // @route   GET /api/about
 // @desc    Get about page content
@@ -12,7 +13,8 @@ router.get("/", async (req, res, next) => {
   try {
     let about = await About.findOne();
 
-    // If no about page exists, create default
+    // If no about page exists, create default. This path is safe
+    // because we are creating with empty, clean arrays.
     if (!about) {
       about = await About.create({
         welcomeMessage: "Welcome to our church family",
@@ -34,7 +36,7 @@ router.get("/", async (req, res, next) => {
 });
 
 // @route   PUT /api/about
-// @desc    Update about page content
+// @desc    Update or Create about page content
 // @access  Private (Admin/Editor)
 router.put(
   "/",
@@ -46,6 +48,7 @@ router.put(
     try {
       let about = await About.findOne();
 
+      // This handles the CREATE case: if no document exists, create a new one.
       if (!about) {
         about = new About();
       }
@@ -62,6 +65,23 @@ router.put(
       if (typeof updateData.coreValues === "string") {
         updateData.coreValues = JSON.parse(updateData.coreValues);
       }
+
+      // --- FIX: Sanitize incoming data to remove temporary IDs ---
+      // This is the first line of defense for the UPDATE case.
+      const cleanArray = (arr) => {
+        if (!arr || !Array.isArray(arr)) return arr;
+        return arr.map((item) => {
+          // If _id is not a valid ObjectId, create a new object without it.
+          if (item._id && !mongoose.Types.ObjectId.isValid(item._id)) {
+            const { _id, ...rest } = item;
+            return rest;
+          }
+          return item;
+        });
+      };
+
+      updateData.leadership = cleanArray(updateData.leadership);
+      updateData.sections = cleanArray(updateData.sections);
 
       // If new welcome image uploaded
       if (req.file) {
@@ -82,7 +102,11 @@ router.put(
       updateData.lastUpdated = Date.now();
       updateData.updatedBy = req.user._id;
 
+      // Merge the cleaned data into the document
       Object.assign(about, updateData);
+
+      // The save() operation will trigger the pre('save') hook in the schema,
+      // which acts as the final safety net for both CREATE and UPDATE.
       await about.save();
 
       res.status(200).json({
@@ -95,6 +119,8 @@ router.put(
     }
   }
 );
+
+// ... (rest of the routes remain the same) ...
 
 // @route   POST /api/about/section-image
 // @desc    Upload image for a section
@@ -179,11 +205,8 @@ router.delete(
   authorize("admin", "editor"),
   async (req, res, next) => {
     try {
-      // Replace URL-encoded slashes
       const publicId = req.params.publicId.replace(/%2F/g, "/");
-
       await deleteImage(publicId);
-
       res.status(200).json({
         success: true,
         message: "Image deleted successfully",
