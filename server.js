@@ -16,6 +16,7 @@ const eventRoutes = require("./routes/events");
 const galleryRoutes = require("./routes/gallery");
 const aboutRoutes = require("./routes/about");
 const contactRoutes = require("./routes/contact");
+const heroSettingsRoutes = require("./routes/heroSettings");
 
 const app = express();
 
@@ -70,6 +71,8 @@ app.use("/api/events", eventRoutes);
 app.use("/api/gallery", galleryRoutes);
 app.use("/api/about", aboutRoutes);
 app.use("/api/contact", contactRoutes);
+
+app.use("/api/hero-settings", heroSettingsRoutes);
 
 // 404 handler
 app.use((req, res) => {

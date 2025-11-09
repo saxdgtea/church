@@ -76,22 +76,38 @@ sermonSchema.index({ date: -1 });
 sermonSchema.index({ isPublished: 1 });
 
 // Extract YouTube video ID before saving
+// Replace the extractYouTubeId method with this improved version
+
+sermonSchema.methods.extractYouTubeId = function (url) {
+  // Handle multiple YouTube URL formats
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=)([^&\s]+)/, // youtube.com/watch?v=ID
+    /(?:youtube\.com\/embed\/)([^?\s]+)/, // youtube.com/embed/ID
+    /(?:youtube\.com\/v\/)([^?\s]+)/, // youtube.com/v/ID
+    /(?:youtu\.be\/)([^?\s]+)/, // youtu.be/ID
+    /(?:youtube\.com\/shorts\/)([^?\s]+)/, // youtube.com/shorts/ID
+  ];
+
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+};
+
+// Also update the pre-save hook to be more robust
 sermonSchema.pre("save", function (next) {
-  if (this.isModified("youtubeUrl")) {
+  if (this.isModified("youtubeUrl") && this.youtubeUrl) {
     const videoId = this.extractYouTubeId(this.youtubeUrl);
     if (videoId) {
       this.youtubeVideoId = videoId;
+    } else {
+      return next(new Error("Invalid YouTube URL format"));
     }
   }
   next();
 });
-
-// Method to extract YouTube video ID
-sermonSchema.methods.extractYouTubeId = function (url) {
-  const regex =
-    /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
-  const match = url.match(regex);
-  return match ? match[1] : null;
-};
-
 module.exports = mongoose.model("Sermon", sermonSchema);
